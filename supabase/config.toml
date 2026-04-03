@@ -1,0 +1,25 @@
+project_id = "zbbesegxngogncwrkpun"
+
+[functions.download-folder-zip]
+verify_jwt = false
+
+[functions.cloudinary-upload]
+verify_jwt = false
+
+[functions.cloudinary-delete]
+verify_jwt = false
+
+[functions.uddoktapay-init]
+verify_jwt = false
+
+[functions.uddoktapay-verify]
+verify_jwt = false
+
+[functions.send-email]
+verify_jwt = false
+
+[functions.share-password]
+verify_jwt = false
+
+[functions.send-share-invite]
+verify_jwt = false
