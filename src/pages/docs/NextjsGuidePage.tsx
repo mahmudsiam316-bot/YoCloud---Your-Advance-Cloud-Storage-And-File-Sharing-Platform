@@ -81,7 +81,7 @@ if (!API_KEY || !BASE_URL) {
 const API_BASE = BASE_URL.replace(/\/$/, "");
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(\`${API_BASE}\${path}\`, {
+  const response = await fetch(\`\${API_BASE}\${path}\`, {
     ...init,
     headers: {
       "X-API-Key": API_KEY,
@@ -287,12 +287,12 @@ export async function DELETE(
 const UPLOADER_CODE = String.raw`// src/components/FileUploader.tsx
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { CloudFile } from "@/types/yocloud";
 
 type UploadStatus = "queued" | "uploading" | "done" | "error";
 
-interface UploadItem {
+interface QueueItem {
   id: string;
   file: File;
   progress: number;
@@ -301,189 +301,164 @@ interface UploadItem {
   error?: string;
 }
 
-function createId() {
+function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
 function formatBytes(bytes?: number | null) {
   if (!bytes) return "0 B";
-  if (bytes < 1024) return \`${bytes} B\`;
-  if (bytes < 1024 * 1024) return \`${(bytes / 1024).toFixed(1)} KB\`;
-  return \`${(bytes / 1024 / 1024).toFixed(2)} MB\`;
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(2) + " MB";
 }
 
-function uploadWithProgress(
+function xhrUpload(
   file: File,
-  onProgress: (progress: number) => void
+  onProgress: (pct: number) => void
 ): Promise<CloudFile> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    const formData = new FormData();
-
-    formData.append("file", file);
+    const fd = new FormData();
+    fd.append("file", file);
 
     xhr.open("POST", "/api/upload");
     xhr.responseType = "json";
-    xhr.timeout = 300000;
+    xhr.timeout = 300_000;
 
-    xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
-      onProgress(Math.round((event.loaded / event.total) * 100));
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
     };
 
     xhr.onload = () => {
-      const data =
-        xhr.response ??
-        (xhr.responseText ? JSON.parse(xhr.responseText) : null);
-
+      const data = xhr.response ?? (xhr.responseText ? JSON.parse(xhr.responseText) : null);
       if (xhr.status >= 200 && xhr.status < 300 && data?.file) {
         resolve(data.file as CloudFile);
-        return;
+      } else {
+        reject(new Error(data?.error || "Upload failed (" + xhr.status + ")"));
       }
-
-      reject(new Error(data?.error || \`Upload failed (\${xhr.status})\`));
     };
 
-    xhr.onerror = () => reject(new Error("Network error while uploading"));
-    xhr.ontimeout = () => reject(new Error("Upload timed out after 5 minutes"));
-
-    xhr.send(formData);
+    xhr.onerror = () => reject(new Error("Network error"));
+    xhr.ontimeout = () => reject(new Error("Upload timed out"));
+    xhr.send(fd);
   });
 }
 
 export default function FileUploader({
   onUploadComplete,
 }: {
-  onUploadComplete?: (uploadedFiles: CloudFile[]) => void;
+  onUploadComplete?: (files: CloudFile[]) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const processingRef = useRef(false);
-  const queueRef = useRef<UploadItem[]>([]);
-  const completedBatchRef = useRef<CloudFile[]>([]);
+  const busyRef = useRef(false);
 
-  const [items, setItems] = useState<UploadItem[]>([]);
+  const [items, setItems] = useState<QueueItem[]>([]);
   const [isDragging, setIsDragging] = useState(false);
 
-  const updateItem = useCallback((id: string, updates: Partial<UploadItem>) => {
-    setItems((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, ...updates } : item
-      )
-    );
-  }, []);
+  // --- Queue processor (reads latest state via callback) ---
+  const processQueue = useCallback(async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
 
-  const flushCompletedBatch = useCallback(() => {
-    if (!onUploadComplete || completedBatchRef.current.length === 0) return;
+    const uploaded: CloudFile[] = [];
 
-    const uploadedFiles = [...completedBatchRef.current];
-    completedBatchRef.current = [];
-    onUploadComplete(uploadedFiles);
+    while (true) {
+      // Get the next queued item from the latest state
+      let nextItem: QueueItem | undefined;
+      await new Promise<void>((r) => {
+        setItems((prev) => {
+          nextItem = prev.find((i) => i.status === "queued");
+          return prev; // no mutation
+        });
+        r();
+      });
+
+      if (!nextItem) break;
+      const itemId = nextItem.id;
+
+      // Mark uploading
+      setItems((prev) =>
+        prev.map((i) => (i.id === itemId ? { ...i, status: "uploading" as const, progress: 0 } : i))
+      );
+
+      try {
+        const result = await xhrUpload(nextItem.file, (pct) => {
+          setItems((prev) =>
+            prev.map((i) => (i.id === itemId ? { ...i, progress: pct } : i))
+          );
+        });
+        uploaded.push(result);
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === itemId ? { ...i, status: "done" as const, progress: 100, result } : i
+          )
+        );
+      } catch (err) {
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === itemId
+              ? { ...i, status: "error" as const, error: err instanceof Error ? err.message : "Failed" }
+              : i
+          )
+        );
+      }
+    }
+
+    busyRef.current = false;
+    if (uploaded.length > 0) onUploadComplete?.(uploaded);
   }, [onUploadComplete]);
 
-  const processNext = useCallback(async () => {
-    if (processingRef.current) return;
+  // --- Add files to queue ---
+  const addFiles = useCallback(
+    (fileList: FileList | File[]) => {
+      const newItems: QueueItem[] = Array.from(fileList).map((file) => ({
+        id: uid(),
+        file,
+        progress: 0,
+        status: "queued" as const,
+      }));
+      if (newItems.length === 0) return;
+      setItems((prev) => [...prev, ...newItems]);
+      // Kick the processor (safe even if already running)
+      setTimeout(() => processQueue(), 0);
+    },
+    [processQueue]
+  );
 
-    const nextItem = queueRef.current.find((item) => item.status === "queued");
+  const clearDone = () => setItems((prev) => prev.filter((i) => i.status !== "done"));
 
-    if (!nextItem) {
-      flushCompletedBatch();
-      return;
-    }
-
-    processingRef.current = true;
-    updateItem(nextItem.id, { status: "uploading", progress: 0 });
-
-    try {
-      const uploadedFile = await uploadWithProgress(nextItem.file, (progress) => {
-        updateItem(nextItem.id, { progress });
-      });
-
-      completedBatchRef.current.push(uploadedFile);
-      updateItem(nextItem.id, {
-        status: "done",
-        progress: 100,
-        result: uploadedFile,
-      });
-    } catch (error) {
-      updateItem(nextItem.id, {
-        status: "error",
-        error:
-          error instanceof Error ? error.message : "Upload failed unexpectedly",
-      });
-    } finally {
-      processingRef.current = false;
-      void processNext();
-    }
-  }, [flushCompletedBatch, updateItem]);
-
-  useEffect(() => {
-    queueRef.current = items;
-    void processNext();
-  }, [items, processNext]);
-
-  const appendFiles = useCallback((files: FileList | File[]) => {
-    const nextItems = Array.from(files).map((file) => ({
-      id: createId(),
-      file,
-      progress: 0,
-      status: "queued" as const,
-    }));
-
-    if (nextItems.length === 0) return;
-
-    setItems((current) => [...current, ...nextItems]);
-  }, []);
-
-  const clearCompleted = () => {
-    setItems((current) => current.filter((item) => item.status !== "done"));
-  };
-
-  const activeCount = items.filter(
-    (item) => item.status === "queued" || item.status === "uploading"
-  ).length;
+  const activeCount = items.filter((i) => i.status === "queued" || i.status === "uploading").length;
 
   return (
     <div className="space-y-4">
+      {/* Drop zone */}
       <div
-        onDragOver={(event) => {
-          event.preventDefault();
-          setIsDragging(true);
-        }}
-        onDragLeave={(event) => {
-          event.preventDefault();
+        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+        onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
+        onDrop={(e) => {
+          e.preventDefault();
           setIsDragging(false);
+          if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
         }}
-        onDrop={(event) => {
-          event.preventDefault();
-          setIsDragging(false);
-          if (event.dataTransfer.files.length > 0) {
-            appendFiles(event.dataTransfer.files);
-          }
-        }}
-        className={\`rounded-2xl border-2 border-dashed p-8 transition \${
-          isDragging
-            ? "border-blue-500 bg-blue-50"
-            : "border-gray-300 bg-white"
-        }\`}
+        className={"rounded-2xl border-2 border-dashed p-8 transition " +
+          (isDragging ? "border-blue-500 bg-blue-50" : "border-gray-300 bg-white")}
       >
         <div className="mx-auto max-w-xl text-center">
           <div className="text-4xl">📤</div>
           <h2 className="mt-3 text-xl font-semibold text-gray-900">
-            Drag and drop files here
+            Drag & drop files here
           </h2>
-          <p className="mt-2 text-sm text-gray-500">
-            অথবা নিচের button থেকে file select করুন — uploader queue auto-process করবে
-          </p>
+          <p className="mt-2 text-sm text-gray-500">Or click the button below</p>
 
           <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
             <button
               type="button"
               onClick={() => inputRef.current?.click()}
-              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white"
+              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
             >
               Browse files
             </button>
-            <span className="text-xs text-gray-500">Max 100MB per file</span>
+            <span className="text-xs text-gray-500">Max 100 MB per file</span>
           </div>
 
           <input
@@ -491,33 +466,22 @@ export default function FileUploader({
             type="file"
             multiple
             className="hidden"
-            onChange={(event) => {
-              if (event.target.files?.length) {
-                appendFiles(event.target.files);
-              }
-              event.target.value = "";
+            onChange={(e) => {
+              if (e.target.files?.length) addFiles(e.target.files);
+              e.target.value = "";
             }}
           />
         </div>
       </div>
 
+      {/* Queue list */}
       {items.length > 0 && (
         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
-          <div className="flex items-center justify-between gap-3 border-b border-gray-200 px-4 py-3">
-            <div>
-              <p className="text-sm font-semibold text-gray-900">Upload queue</p>
-              <p className="text-xs text-gray-500">
-                {activeCount > 0
-                  ? \`\${activeCount} file still processing\`
-                  : "সব file processed হয়ে গেছে"}
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={clearCompleted}
-              className="text-xs font-medium text-blue-600"
-            >
+          <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+            <p className="text-sm font-semibold text-gray-900">
+              {activeCount > 0 ? activeCount + " uploading…" : "All done"}
+            </p>
+            <button type="button" onClick={clearDone} className="text-xs font-medium text-blue-600">
               Clear completed
             </button>
           </div>
@@ -527,55 +491,39 @@ export default function FileUploader({
               <div key={item.id} className="px-4 py-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-gray-900">
-                      {item.file.name}
-                    </p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      {formatBytes(item.file.size)}
-                    </p>
+                    <p className="truncate text-sm font-medium text-gray-900">{item.file.name}</p>
+                    <p className="mt-0.5 text-xs text-gray-500">{formatBytes(item.file.size)}</p>
                   </div>
-
                   <span className="shrink-0 text-xs font-medium text-gray-500">
                     {item.status === "queued" && "Queued"}
-                    {item.status === "uploading" && \`${item.progress}%\`}
-                    {item.status === "done" && "Done"}
-                    {item.status === "error" && "Error"}
+                    {item.status === "uploading" && item.progress + "%"}
+                    {item.status === "done" && "✓ Done"}
+                    {item.status === "error" && "✗ Error"}
                   </span>
                 </div>
 
                 {(item.status === "queued" || item.status === "uploading") && (
-                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-200">
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-200">
                     <div
-                      className="h-full rounded-full bg-blue-600 transition-all"
-                      style={{ width: \`${item.progress}%\` }}
+                      className="h-full rounded-full bg-blue-600 transition-all duration-300"
+                      style={{ width: item.progress + "%" }}
                     />
                   </div>
                 )}
 
                 {item.status === "error" && (
-                  <p className="mt-2 text-xs text-red-600">{item.error}</p>
+                  <p className="mt-1 text-xs text-red-600">{item.error}</p>
                 )}
 
                 {item.status === "done" && item.result && (
-                  <div className="mt-3 rounded-xl border border-green-200 bg-green-50 p-3 text-xs text-gray-700">
-                    <p>
-                      <strong>ID:</strong> {item.result.id}
-                    </p>
-                    <p>
-                      <strong>Type:</strong> {item.result.mime_type || "unknown"}
-                    </p>
-                    <p>
-                      <strong>Created:</strong>{" "}
-                      {new Date(item.result.created_at).toLocaleString()}
-                    </p>
+                  <div className="mt-2 rounded-lg border border-green-200 bg-green-50 p-2.5 text-xs text-gray-700 space-y-0.5">
+                    <p><strong>ID:</strong> {item.result.id}</p>
+                    <p><strong>Type:</strong> {item.result.mime_type || "unknown"}</p>
+                    <p><strong>Created:</strong> {new Date(item.result.created_at).toLocaleString()}</p>
                     {item.result.cloudinary_url && (
-                      <a
-                        href={item.result.cloudinary_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mt-2 inline-flex text-blue-600 underline"
-                      >
-                        Open uploaded file
+                      <a href={item.result.cloudinary_url} target="_blank" rel="noreferrer"
+                        className="mt-1 inline-block text-blue-600 underline">
+                        Open file ↗
                       </a>
                     )}
                   </div>
@@ -597,9 +545,9 @@ import type { CloudFile } from "@/types/yocloud";
 
 function formatBytes(bytes?: number | null) {
   if (!bytes) return "0 B";
-  if (bytes < 1024) return \`${bytes} B\`;
-  if (bytes < 1024 * 1024) return \`${(bytes / 1024).toFixed(1)} KB\`;
-  return \`${(bytes / 1024 / 1024).toFixed(2)} MB\`;
+  if (bytes < 1024) return \`\${bytes} B\`;
+  if (bytes < 1024 * 1024) return \`\${(bytes / 1024).toFixed(1)} KB\`;
+  return \`\${(bytes / 1024 / 1024).toFixed(2)} MB\`;
 }
 
 export default function FileList({
@@ -729,7 +677,7 @@ export default function FileList({
                 <p className="mt-1 text-xs text-gray-500">
                   {file.is_folder
                     ? "Folder"
-                    : \`${formatBytes(file.size)} • \${file.mime_type || "unknown"}\`}
+                    : \`\${formatBytes(file.size)} • \${file.mime_type || "unknown"}\`}
                 </p>
               </div>
 
