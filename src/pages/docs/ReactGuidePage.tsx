@@ -74,9 +74,20 @@ npm install`} lang="bash" {...codeProps} />
           Vite provides instant server start, lightning-fast HMR, and optimized builds.
         </p>
         <div className="mt-3">
-          <p className="text-[10px] font-semibold text-foreground mb-1">Install additional dependencies:</p>
-          <CodeBlock code={`npm install axios react-query
-# axios for HTTP requests, react-query for data fetching & caching`} lang="bash" {...codeProps} />
+          <p className="text-[10px] font-semibold text-foreground mb-1">📦 Install required dependencies:</p>
+          <CodeBlock code={`# Install packages
+npm install axios @tanstack/react-query
+# or with yarn
+yarn add axios @tanstack/react-query
+# or with pnpm
+pnpm add axios @tanstack/react-query`} lang="bash" {...codeProps} />
+        </div>
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold text-foreground mb-1">📥 Import in your files:</p>
+          <CodeBlock code={`// In your React components or hooks:
+import axios from 'axios';
+import { useQuery, useMutation, QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useState, useEffect, useCallback } from 'react';`} lang="typescript" {...codeProps} />
         </div>
       </section>
 
