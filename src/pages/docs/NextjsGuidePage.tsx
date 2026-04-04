@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
-import { Check, AlertTriangle, FolderPlus, Play, Package, Shield } from "lucide-react";
+import { Check, AlertTriangle, FolderPlus, Play, Package, Shield, Upload } from "lucide-react";
 import DocsLayout, { CodeBlock, useDocsContext } from "@/components/docs/DocsLayout";
 import nextjsIcon from "@/assets/nextjs-icon.png";
 
-const SECTION_IDS = ["nextjs-overview", "nextjs-setup", "nextjs-env", "nextjs-client", "nextjs-server", "nextjs-upload-route", "nextjs-upload-component", "nextjs-run", "nextjs-structure", "nextjs-tips"];
+const SECTION_IDS = ["nextjs-overview", "nextjs-setup", "nextjs-env", "nextjs-client", "nextjs-server", "nextjs-upload-route", "nextjs-upload-component", "nextjs-full-uploader", "nextjs-run", "nextjs-structure", "nextjs-tips"];
 
 export default function NextjsGuidePage() {
   const [activeSection, setActiveSection] = useState("nextjs-overview");
@@ -257,9 +257,9 @@ export async function POST(request: NextRequest) {
       </section>
 
       <section id="nextjs-upload-component">
-        <StepHeader step={6} title="Create Upload Component (Client)" />
+        <StepHeader step={6} title="Basic Upload Component" />
         <p className="text-[11px] text-muted-foreground mb-3">
-          Create <code className="text-primary font-mono">src/components/UploadButton.tsx</code>:
+          A minimal client-side upload button — Create <code className="text-primary font-mono">src/components/UploadButton.tsx</code>:
         </p>
         <CodeBlock code={`// src/components/UploadButton.tsx
 "use client";
@@ -310,8 +310,274 @@ export default function UploadButton() {
 }`} lang="typescript" {...codeProps} />
       </section>
 
+      <section id="nextjs-full-uploader">
+        <StepHeader step={7} title="Advanced Uploader with Progress & Details" />
+        <p className="text-[11px] text-muted-foreground mb-3">
+          A production-ready uploader with <strong className="text-foreground">drag & drop</strong>, <strong className="text-foreground">real-time progress</strong>, <strong className="text-foreground">multi-file queue</strong>, and <strong className="text-foreground">file details</strong> after upload.
+          Create <code className="text-primary font-mono">src/components/FileUploader.tsx</code>:
+        </p>
+        <CodeBlock code={`// src/components/FileUploader.tsx
+"use client";
+
+import { useState, useRef, useCallback } from "react";
+
+interface UploadedFile {
+  id: string;
+  name: string;
+  size: number;
+  mime_type: string;
+  cloudinary_url: string;
+  created_at: string;
+}
+
+interface FileQueueItem {
+  file: File;
+  id: string;
+  progress: number;
+  status: "queued" | "uploading" | "done" | "error";
+  result?: UploadedFile;
+  error?: string;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+}
+
+export default function FileUploader() {
+  const [queue, setQueue] = useState<FileQueueItem[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const isUploading = useRef(false);
+
+  const addFiles = useCallback((files: FileList | File[]) => {
+    const items: FileQueueItem[] = Array.from(files).map((file) => ({
+      file,
+      id: crypto.randomUUID(),
+      progress: 0,
+      status: "queued" as const,
+    }));
+    setQueue((prev) => [...prev, ...items]);
+    processQueue([...items]);
+  }, []);
+
+  const processQueue = async (items: FileQueueItem[]) => {
+    if (isUploading.current) return;
+    isUploading.current = true;
+
+    for (const item of items) {
+      setQueue((prev) =>
+        prev.map((q) => (q.id === item.id ? { ...q, status: "uploading" } : q))
+      );
+
+      try {
+        const result = await uploadWithProgress(item.file, (progress) => {
+          setQueue((prev) =>
+            prev.map((q) => (q.id === item.id ? { ...q, progress } : q))
+          );
+        });
+
+        setQueue((prev) =>
+          prev.map((q) =>
+            q.id === item.id
+              ? { ...q, status: "done", progress: 100, result: result.file }
+              : q
+          )
+        );
+      } catch (err: any) {
+        setQueue((prev) =>
+          prev.map((q) =>
+            q.id === item.id
+              ? { ...q, status: "error", error: err.message || "Upload failed" }
+              : q
+          )
+        );
+      }
+    }
+
+    isUploading.current = false;
+  };
+
+  const uploadWithProgress = (
+    file: File,
+    onProgress: (pct: number) => void
+  ): Promise<{ file: UploadedFile }> => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append("file", file);
+
+      xhr.open("POST", "/api/upload");
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 95));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          onProgress(100);
+          resolve(JSON.parse(xhr.responseText));
+        } else {
+          try {
+            const err = JSON.parse(xhr.responseText);
+            reject(new Error(err.error || "Upload failed"));
+          } catch {
+            reject(new Error("Upload failed"));
+          }
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("Network error"));
+      xhr.send(formData);
+    });
+  };
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setIsDragging(false);
+      if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    },
+    [addFiles]
+  );
+
+  const clearCompleted = () =>
+    setQueue((prev) => prev.filter((q) => q.status !== "done"));
+
+  return (
+    <div className="space-y-4">
+      {/* Drop Zone */}
+      <div
+        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+        onDragLeave={() => setIsDragging(false)}
+        onDrop={handleDrop}
+        onClick={() => fileRef.current?.click()}
+        className={\`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer
+          transition-colors \${isDragging
+            ? "border-blue-500 bg-blue-50"
+            : "border-gray-300 hover:border-blue-400 hover:bg-gray-50"
+        }\`}
+      >
+        <p className="text-lg font-medium">
+          {isDragging ? "Drop files here" : "Drag & drop files or click to browse"}
+        </p>
+        <p className="text-sm text-gray-500 mt-1">
+          Supports any file type up to 100MB
+        </p>
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => e.target.files && addFiles(e.target.files)}
+        />
+      </div>
+
+      {/* Upload Queue */}
+      {queue.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <h3 className="font-semibold text-sm">
+              Upload Queue ({queue.filter((q) => q.status === "done").length}/{queue.length})
+            </h3>
+            <button onClick={clearCompleted} className="text-xs text-blue-600 hover:underline">
+              Clear completed
+            </button>
+          </div>
+
+          {/* Scrollable list */}
+          <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+            {queue.map((item) => (
+              <div key={item.id} className="p-3 rounded-lg border bg-white">
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-sm font-medium truncate max-w-[60%]">
+                    {item.file.name}
+                  </p>
+                  <span className="text-xs text-gray-500">{formatSize(item.file.size)}</span>
+                </div>
+
+                {/* Progress bar */}
+                {item.status === "uploading" && (
+                  <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: \`\${item.progress}%\` }}
+                    />
+                  </div>
+                )}
+
+                {/* Status */}
+                <div className="flex items-center gap-2 text-xs">
+                  {item.status === "queued" && (
+                    <span className="text-gray-400">⏳ Queued</span>
+                  )}
+                  {item.status === "uploading" && (
+                    <span className="text-blue-600">⬆️ Uploading... {item.progress}%</span>
+                  )}
+                  {item.status === "done" && (
+                    <span className="text-green-600">✅ Uploaded</span>
+                  )}
+                  {item.status === "error" && (
+                    <span className="text-red-600">❌ {item.error}</span>
+                  )}
+                </div>
+
+                {/* File Details after upload */}
+                {item.status === "done" && item.result && (
+                  <div className="mt-2 p-2 rounded bg-gray-50 text-xs space-y-1">
+                    <p><strong>ID:</strong> {item.result.id}</p>
+                    <p><strong>Type:</strong> {item.result.mime_type}</p>
+                    <p><strong>Size:</strong> {formatSize(item.result.size)}</p>
+                    <p><strong>Created:</strong> {new Date(item.result.created_at).toLocaleString()}</p>
+                    {item.result.cloudinary_url && (
+                      <a href={item.result.cloudinary_url} target="_blank" rel="noreferrer"
+                        className="text-blue-600 hover:underline">
+                        🔗 View / Download
+                      </a>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}`} lang="typescript" {...codeProps} />
+
+        <div className="mt-3 p-3 rounded-xl border border-border bg-secondary/20">
+          <p className="text-[10px] font-semibold text-foreground mb-1">📋 Features included:</p>
+          <ul className="space-y-1 text-[10px] text-muted-foreground">
+            <li className="flex gap-2"><Check className="w-3 h-3 text-emerald-500 shrink-0 mt-0.5" /><span><strong className="text-foreground">Drag & Drop</strong> — drop files directly onto the upload zone</span></li>
+            <li className="flex gap-2"><Check className="w-3 h-3 text-emerald-500 shrink-0 mt-0.5" /><span><strong className="text-foreground">Real-time Progress</strong> — actual XHR progress tracking with percentage</span></li>
+            <li className="flex gap-2"><Check className="w-3 h-3 text-emerald-500 shrink-0 mt-0.5" /><span><strong className="text-foreground">Multi-file Queue</strong> — upload multiple files sequentially with scrollable list</span></li>
+            <li className="flex gap-2"><Check className="w-3 h-3 text-emerald-500 shrink-0 mt-0.5" /><span><strong className="text-foreground">File Details</strong> — shows ID, type, size, date & download link after upload</span></li>
+            <li className="flex gap-2"><Check className="w-3 h-3 text-emerald-500 shrink-0 mt-0.5" /><span><strong className="text-foreground">Error Handling</strong> — per-file error messages with clear status indicators</span></li>
+          </ul>
+        </div>
+
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold text-foreground mb-1">🔌 Usage in your page:</p>
+          <CodeBlock code={`// src/app/page.tsx
+import FileUploader from "@/components/FileUploader";
+
+export default function HomePage() {
+  return (
+    <main className="max-w-2xl mx-auto p-8">
+      <h1 className="text-3xl font-bold mb-6">Upload Files</h1>
+      <FileUploader />
+    </main>
+  );
+}`} lang="typescript" {...codeProps} />
+        </div>
+      </section>
+
       <section id="nextjs-run">
-        <StepHeader step={7} title="Run the Development Server" last />
+        <StepHeader step={8} title="Run the Development Server" last />
         <p className="text-[11px] text-muted-foreground mb-3">
           Start your Next.js development server:
         </p>
@@ -329,17 +595,18 @@ export default function UploadButton() {
             Final Project Structure
           </h3>
           <pre className="text-[11px] font-mono text-muted-foreground whitespace-pre">{`my-yocloud-app/
-├── .env.local              ← API key (git-ignored)
+├── .env.local                ← API key (git-ignored)
 ├── src/
 │   ├── app/
-│   │   ├── page.tsx         ← Server Component (list files)
+│   │   ├── page.tsx           ← Server Component (list files)
 │   │   └── api/
 │   │       └── upload/
-│   │           └── route.ts ← Upload API Route
+│   │           └── route.ts   ← Upload API Route
 │   ├── components/
-│   │   └── UploadButton.tsx ← Client upload component
+│   │   ├── UploadButton.tsx   ← Basic upload button
+│   │   └── FileUploader.tsx   ← Advanced uploader (drag & drop, progress, details)
 │   └── lib/
-│       └── yocloud.ts       ← API client helper
+│       └── yocloud.ts         ← API client helper
 ├── package.json
 └── tsconfig.json`}</pre>
         </div>
