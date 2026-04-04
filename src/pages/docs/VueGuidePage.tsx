@@ -69,6 +69,24 @@ npm install`} lang="bash" {...codeProps} />
         <p className="text-[10px] text-muted-foreground mt-2">
           This gives you Vue 3 with TypeScript, Vite, and Single File Components (SFC) ready to go.
         </p>
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold text-foreground mb-1">📦 Install required dependencies:</p>
+          <CodeBlock code={`# Install packages
+npm install axios @tanstack/vue-query
+# or with yarn
+yarn add axios @tanstack/vue-query
+# or with pnpm
+pnpm add axios @tanstack/vue-query`} lang="bash" {...codeProps} />
+        </div>
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold text-foreground mb-1">📥 Import in your files:</p>
+          <CodeBlock code={`// In your Vue components or composables:
+import axios from 'axios';
+import { ref, reactive, onMounted } from 'vue';
+
+// Vue Query (optional but recommended for caching):
+import { useQuery, useMutation } from '@tanstack/vue-query';`} lang="typescript" {...codeProps} />
+        </div>
       </section>
 
       <section id="vue-env">
