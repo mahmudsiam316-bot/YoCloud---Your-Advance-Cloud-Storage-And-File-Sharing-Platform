@@ -109,6 +109,7 @@ export async function listFiles(options?: {
   limit?: number;
   offset?: number;
   parentId?: string | null;
+  workspaceId?: string | null;
 }): Promise<FilesListResponse> {
   const params = new URLSearchParams();
   params.set("limit", String(options?.limit ?? 50));
@@ -116,6 +117,10 @@ export async function listFiles(options?: {
 
   if (options?.parentId) {
     params.set("parent_id", options.parentId);
+  }
+
+  if (options?.workspaceId) {
+    params.set("workspace_id", options.workspaceId);
   }
 
   return api<FilesListResponse>(\`/files?\${params.toString()}\`);
@@ -207,6 +212,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { listFiles } from "@/lib/yocloud";
 import type { ApiError } from "@/types/yocloud";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
@@ -242,6 +248,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { deleteFile, getFileDetails } from "@/lib/yocloud";
 import type { ApiError } from "@/types/yocloud";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(
@@ -314,19 +321,26 @@ function formatBytes(bytes?: number | null) {
 
 function xhrUpload(
   file: File,
-  onProgress: (pct: number) => void
+  options: {
+    parentId?: string | null;
+    workspaceId?: string | null;
+    onProgress: (pct: number) => void;
+  }
 ): Promise<CloudFile> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const fd = new FormData();
     fd.append("file", file);
 
+    if (options.parentId) fd.append("parentId", options.parentId);
+    if (options.workspaceId) fd.append("workspaceId", options.workspaceId);
+
     xhr.open("POST", "/api/upload");
     xhr.responseType = "json";
     xhr.timeout = 300_000;
 
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      if (e.lengthComputable) options.onProgress(Math.round((e.loaded / e.total) * 100));
     };
 
     xhr.onload = () => {
@@ -346,16 +360,28 @@ function xhrUpload(
 
 export default function FileUploader({
   onUploadComplete,
+  parentId = null,
+  workspaceId = null,
 }: {
   onUploadComplete?: (files: CloudFile[]) => void;
+  parentId?: string | null;
+  workspaceId?: string | null;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const busyRef = useRef(false);
+  const queueRef = useRef<QueueItem[]>([]);
 
   const [items, setItems] = useState<QueueItem[]>([]);
   const [isDragging, setIsDragging] = useState(false);
 
-  // --- Queue processor (reads latest state via callback) ---
+  const syncItems = useCallback((updater: (prev: QueueItem[]) => QueueItem[]) => {
+    setItems((prev) => {
+      const next = updater(prev);
+      queueRef.current = next;
+      return next;
+    });
+  }, []);
+
   const processQueue = useCallback(async () => {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -363,41 +389,40 @@ export default function FileUploader({
     const uploaded: CloudFile[] = [];
 
     while (true) {
-      // Get the next queued item from the latest state
-      let nextItem: QueueItem | undefined;
-      await new Promise<void>((r) => {
-        setItems((prev) => {
-          nextItem = prev.find((i) => i.status === "queued");
-          return prev; // no mutation
-        });
-        r();
-      });
+      const nextItem = queueRef.current.find((item) => item.status === "queued");
 
       if (!nextItem) break;
       const itemId = nextItem.id;
 
-      // Mark uploading
-      setItems((prev) =>
+      syncItems((prev) =>
         prev.map((i) => (i.id === itemId ? { ...i, status: "uploading" as const, progress: 0 } : i))
       );
 
       try {
-        const result = await xhrUpload(nextItem.file, (pct) => {
-          setItems((prev) =>
-            prev.map((i) => (i.id === itemId ? { ...i, progress: pct } : i))
-          );
+        const result = await xhrUpload(nextItem.file, {
+          parentId,
+          workspaceId,
+          onProgress: (pct) => {
+            syncItems((prev) =>
+              prev.map((i) => (i.id === itemId ? { ...i, progress: pct } : i))
+            );
+          },
         });
         uploaded.push(result);
-        setItems((prev) =>
+        syncItems((prev) =>
           prev.map((i) =>
             i.id === itemId ? { ...i, status: "done" as const, progress: 100, result } : i
           )
         );
       } catch (err) {
-        setItems((prev) =>
+        syncItems((prev) =>
           prev.map((i) =>
             i.id === itemId
-              ? { ...i, status: "error" as const, error: err instanceof Error ? err.message : "Failed" }
+              ? {
+                  ...i,
+                  status: "error" as const,
+                  error: err instanceof Error ? err.message : "Upload failed",
+                }
               : i
           )
         );
@@ -406,9 +431,8 @@ export default function FileUploader({
 
     busyRef.current = false;
     if (uploaded.length > 0) onUploadComplete?.(uploaded);
-  }, [onUploadComplete]);
+  }, [onUploadComplete, parentId, syncItems, workspaceId]);
 
-  // --- Add files to queue ---
   const addFiles = useCallback(
     (fileList: FileList | File[]) => {
       const newItems: QueueItem[] = Array.from(fileList).map((file) => ({
@@ -418,20 +442,19 @@ export default function FileUploader({
         status: "queued" as const,
       }));
       if (newItems.length === 0) return;
-      setItems((prev) => [...prev, ...newItems]);
-      // Kick the processor (safe even if already running)
+      syncItems((prev) => [...prev, ...newItems]);
       setTimeout(() => processQueue(), 0);
     },
-    [processQueue]
+    [processQueue, syncItems]
   );
 
-  const clearDone = () => setItems((prev) => prev.filter((i) => i.status !== "done"));
+  const clearDone = () => syncItems((prev) => prev.filter((i) => i.status !== "done"));
+  const hasActiveUpload = items.some((item) => item.status === "queued" || item.status === "uploading");
 
   const activeCount = items.filter((i) => i.status === "queued" || i.status === "uploading").length;
 
   return (
     <div className="space-y-4">
-      {/* Drop zone */}
       <div
         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
         onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
@@ -441,7 +464,7 @@ export default function FileUploader({
           if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
         }}
         className={"rounded-2xl border-2 border-dashed p-8 transition " +
-          (isDragging ? "border-blue-500 bg-blue-50" : "border-gray-300 bg-white")}
+          (isDragging ? "border-sky-500 bg-sky-50" : "border-gray-300 bg-white")}
       >
         <div className="mx-auto max-w-xl text-center">
           <div className="text-4xl">📤</div>
@@ -454,9 +477,10 @@ export default function FileUploader({
             <button
               type="button"
               onClick={() => inputRef.current?.click()}
-              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
+              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={hasActiveUpload}
             >
-              Browse files
+              {hasActiveUpload ? "Uploading..." : "Browse files"}
             </button>
             <span className="text-xs text-gray-500">Max 100 MB per file</span>
           </div>
@@ -474,14 +498,13 @@ export default function FileUploader({
         </div>
       </div>
 
-      {/* Queue list */}
       {items.length > 0 && (
         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
           <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
             <p className="text-sm font-semibold text-gray-900">
               {activeCount > 0 ? activeCount + " uploading…" : "All done"}
             </p>
-            <button type="button" onClick={clearDone} className="text-xs font-medium text-blue-600">
+              <button type="button" onClick={clearDone} className="text-xs font-medium text-blue-600">
               Clear completed
             </button>
           </div>
@@ -554,10 +577,14 @@ export default function FileList({
   initialFiles,
   initialError,
   refreshToken,
+  parentId = null,
+  workspaceId = null,
 }: {
   initialFiles: CloudFile[];
   initialError?: string | null;
   refreshToken: number;
+  parentId?: string | null;
+  workspaceId?: string | null;
 }) {
   const [files, setFiles] = useState(initialFiles);
   const [error, setError] = useState<string | null>(initialError ?? null);
@@ -565,9 +592,14 @@ export default function FileList({
 
   const fetchFiles = useCallback(async () => {
     setRefreshing(true);
+    setError(null);
 
     try {
-      const response = await fetch("/api/files?limit=50&offset=0", {
+      const params = new URLSearchParams({ limit: "50", offset: "0" });
+      if (parentId) params.set("parent_id", parentId);
+      if (workspaceId) params.set("workspace_id", workspaceId);
+
+      const response = await fetch(\`/api/files?\${params.toString()}\`, {
         cache: "no-store",
       });
       const data = await response.json();
@@ -587,7 +619,7 @@ export default function FileList({
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [parentId, workspaceId]);
 
   useEffect(() => {
     if (refreshToken === 0) return;
@@ -642,7 +674,7 @@ export default function FileList({
         <div className="text-4xl">📁</div>
         <h3 className="mt-3 text-lg font-semibold text-gray-900">No files yet</h3>
         <p className="mt-2 text-sm text-gray-500">
-          প্রথম upload complete হলেই এই list auto-refresh হবে
+          Upload files to get started
         </p>
       </div>
     );
@@ -719,9 +751,13 @@ import type { CloudFile } from "@/types/yocloud";
 export default function FileManager({
   initialFiles,
   initialError,
+  parentId = null,
+  workspaceId = null,
 }: {
   initialFiles: CloudFile[];
   initialError?: string | null;
+  parentId?: string | null;
+  workspaceId?: string | null;
 }) {
   const [refreshToken, setRefreshToken] = useState(0);
   const [lastUploadCount, setLastUploadCount] = useState(0);
@@ -732,11 +768,13 @@ export default function FileManager({
         <div>
           <h2 className="text-2xl font-semibold text-gray-900">Upload files</h2>
           <p className="mt-1 text-sm text-gray-500">
-            File select, drag & drop, real progress, queue processing — সব একসাথে
+            File select, drag & drop, real progress, queue processing
           </p>
         </div>
 
         <FileUploader
+          parentId={parentId}
+          workspaceId={workspaceId}
           onUploadComplete={(uploadedFiles) => {
             setLastUploadCount(uploadedFiles.length);
             setRefreshToken((value) => value + 1);
@@ -755,7 +793,7 @@ export default function FileManager({
           <div>
             <h2 className="text-2xl font-semibold text-gray-900">Your files</h2>
             <p className="mt-1 text-sm text-gray-500">
-              Initial list server থেকে আসে, তাই first render এ late loading লাগে না
+              Initial list loads from server for fast first render
             </p>
           </div>
         </div>
@@ -764,6 +802,8 @@ export default function FileManager({
           initialFiles={initialFiles}
           initialError={initialError}
           refreshToken={refreshToken}
+          parentId={parentId}
+          workspaceId={workspaceId}
         />
       </section>
     </div>
@@ -894,8 +934,8 @@ function Content() {
         </div>
 
         <p className="mb-4 text-sm leading-relaxed text-muted-foreground">
-          এই version-এ uploader selection issue, queue issue, আর late file listing issue ঠিক করা হয়েছে।
-          API key server-side থাকবে, uploader actual progress দেখাবে, আর file list initial render-এ server থেকে load হবে।
+          This version fixes the uploader selection issue, queue processing bug, and slow file listing.
+          API key stays server-side, uploader shows actual progress, and file list loads from the server on first render.
         </p>
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -903,7 +943,7 @@ function Content() {
             {
               icon: Shield,
               title: "Server-side API key",
-              desc: "Key browser-এ expose হয় না — সব request Next.js route দিয়ে যায়.",
+              desc: "Key never exposed in browser — all requests go through Next.js routes.",
             },
             {
               icon: Play,
@@ -913,7 +953,7 @@ function Content() {
             {
               icon: Package,
               title: "Fast first file list",
-              desc: "Initial files server থেকে আসে, তাই client-side blank loading কমে যায়.",
+              desc: "Initial files loaded from server, eliminating client-side blank loading.",
             },
           ].map((item) => (
             <div key={item.title} className="rounded-xl border border-border bg-secondary/20 p-3">
@@ -1002,8 +1042,8 @@ function Content() {
       <section id="nextjs-uploader">
         <StepHeader step={8} title="Add the fixed uploader component" />
         <p className="mb-3 text-[11px] text-muted-foreground">
-          This version fixes two common problems: <strong className="text-foreground">file selection not opening</strong>
-          {' '}and <strong className="text-foreground">new files getting stuck in queue</strong>.
+          This version fixes the real problems: <strong className="text-foreground">file picker not opening</strong>,{' '}
+          <strong className="text-foreground">queue getting stuck</strong>, and <strong className="text-foreground">uploads not targeting the correct folder/workspace</strong>.
         </p>
         <CodeBlock code={UPLOADER_CODE} lang="typescript" {...codeProps} />
 
@@ -1016,11 +1056,15 @@ function Content() {
             </li>
             <li className="flex gap-2">
               <Check className="mt-0.5 h-3 w-3 shrink-0 text-primary" />
-              <span>Queue processor reads from a ref, so files added during upload are processed too.</span>
+              <span>Queue processor reads from a ref, so files added during upload are processed reliably.</span>
             </li>
             <li className="flex gap-2">
               <Check className="mt-0.5 h-3 w-3 shrink-0 text-primary" />
               <span>Upload list is scrollable and shows actual XHR progress percentage.</span>
+            </li>
+            <li className="flex gap-2">
+              <Check className="mt-0.5 h-3 w-3 shrink-0 text-primary" />
+              <span>Optional <strong className="text-foreground">parentId</strong> and <strong className="text-foreground">workspaceId</strong> are forwarded, so uploads land in the intended location.</span>
             </li>
           </ul>
         </div>
