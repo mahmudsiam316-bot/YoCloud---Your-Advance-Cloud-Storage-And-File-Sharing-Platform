@@ -63,11 +63,24 @@ function Content() {
         <p className="text-[11px] text-muted-foreground mb-3">
           Make sure Flutter SDK is installed, then create a new project:
         </p>
-        <CodeBlock code={`flutter create my_yocloud_app
+        <CodeBlock code={`# Install Flutter SDK (if not installed)
+# https://docs.flutter.dev/get-started/install
+
+# Create new project
+flutter create my_yocloud_app
 cd my_yocloud_app`} lang="bash" {...codeProps} />
         <p className="text-[10px] text-muted-foreground mt-2">
           This creates a new Flutter project with Material Design, Dart null safety, and platform-specific build configurations.
         </p>
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold text-foreground mb-1">📥 Import in your Dart files:</p>
+          <CodeBlock code={`// In your Dart files:
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:provider/provider.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';`} lang="dart" {...codeProps} />
+        </div>
       </section>
 
       <section id="flutter-deps">
