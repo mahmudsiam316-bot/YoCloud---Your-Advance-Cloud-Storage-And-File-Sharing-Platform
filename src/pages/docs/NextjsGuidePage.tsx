@@ -69,6 +69,24 @@ cd my-yocloud-app`} lang="bash" {...codeProps} />
           This creates a Next.js 14+ project with App Router, TypeScript, and Tailwind CSS pre-configured.
           The <code className="text-primary font-mono">--src-dir</code> flag puts source code in <code className="text-primary font-mono">src/</code>.
         </p>
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold text-foreground mb-1">📦 Install required dependencies:</p>
+          <CodeBlock code={`# Install packages
+npm install axios
+# or with yarn
+yarn add axios
+# or with pnpm
+pnpm add axios`} lang="bash" {...codeProps} />
+        </div>
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold text-foreground mb-1">📥 Import in your files:</p>
+          <CodeBlock code={`// Import in your server components or API routes:
+import axios from 'axios';
+
+// Next.js built-in (no install needed):
+import { NextRequest, NextResponse } from 'next/server';
+import { headers } from 'next/headers';`} lang="typescript" {...codeProps} />
+        </div>
       </section>
 
       <section id="nextjs-env">
